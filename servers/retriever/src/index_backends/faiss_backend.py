@@ -10,8 +10,13 @@ from tqdm import tqdm
 from .base import BaseIndexBackend
 from fastmcp.exceptions import ValidationError
 
+import sys
+
 try:
     import faiss
+    # Fix OpenMP threading issue on macOS that causes segfault
+    if sys.platform == "darwin":
+        faiss.omp_set_num_threads(1)
 except ImportError:
     faiss = None
 
@@ -63,6 +68,14 @@ class FaissIndexBackend(BaseIndexBackend):
     def _maybe_to_gpu(self, cpu_index):
         if not self.use_gpu:
             return cpu_index
+
+        # Check if FAISS GPU support is available
+        if not hasattr(faiss, 'GpuMultipleClonerOptions'):
+            warn_msg = "[faiss] GPU support not available (faiss-cpu installed). Using CPU."
+            self.logger.warning(warn_msg)
+            self.use_gpu = False
+            return cpu_index
+
         co = faiss.GpuMultipleClonerOptions()
         co.shard = True
         co.useFloat16 = True

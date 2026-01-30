@@ -142,6 +142,9 @@ class Retriever:
 
         self.cfg = self.backend_configs.get(self.backend, {})
 
+        import sys
+        import torch
+
         if gpu_ids is None:
             self.gpu_ids = None
             self.device = "cpu"
@@ -149,15 +152,30 @@ class Retriever:
             app.logger.info("[retriever] gpu_ids is None, treat as CPU-only mode.")
         else:
             gpu_ids = str(gpu_ids)
-            os.environ["CUDA_VISIBLE_DEVICES"] = gpu_ids
-            self.gpu_ids = gpu_ids
-            self.device = "cuda"
-            self.device_num = len(gpu_ids.split(","))
-            app.logger.info(
-                "[retriever] Set CUDA_VISIBLE_DEVICES=%s, device_num=%d",
-                gpu_ids,
-                self.device_num,
-            )
+            # Check platform and available backends
+            if sys.platform == "darwin":
+                # macOS: use CPU for stability in MCP subprocess
+                # MPS can cause issues with multiprocessing/threading in MCP context
+                self.gpu_ids = None
+                self.device = "cpu"
+                self.device_num = 1
+                app.logger.info("[retriever] macOS detected, using CPU for stability.")
+            elif torch.cuda.is_available():
+                os.environ["CUDA_VISIBLE_DEVICES"] = gpu_ids
+                self.gpu_ids = gpu_ids
+                self.device = "cuda"
+                self.device_num = len(gpu_ids.split(","))
+                app.logger.info(
+                    "[retriever] Set CUDA_VISIBLE_DEVICES=%s, device_num=%d",
+                    gpu_ids,
+                    self.device_num,
+                )
+            else:
+                # No GPU available, fallback to CPU
+                self.gpu_ids = None
+                self.device = "cpu"
+                self.device_num = 1
+                app.logger.warning("[retriever] gpu_ids provided but no CUDA available, falling back to CPU.")
 
         if self.backend == "infinity":
             try:
@@ -462,8 +480,8 @@ class Retriever:
                 pbar.close()
 
         elif self.backend == "sentence_transformers":
-            if self.device == "cpu":
-                device_param = "cpu"
+            if self.device in ("cpu", "mps"):
+                device_param = self.device
                 is_multi_gpu = False
             else:
                 if self.device_num > 1:
@@ -492,38 +510,30 @@ class Retriever:
                 )
                 pool = self.model.start_multi_process_pool()
                 try:
-
-                    def _encode_all():
-                        return self.model.encode(
-                            data,
-                            pool=pool,
-                            batch_size=self.batch_size,
-                            chunk_size=csz,
-                            show_progress_bar=True,
-                            normalize_embeddings=normalize,
-                            precision="float32",
-                            prompt_name=psg_prompt_name,
-                            task=psg_task,
-                        )
-
-                    embeddings = await asyncio.to_thread(_encode_all)
-                finally:
-                    self.model.stop_multi_process_pool(pool)
-            else:
-
-                def _encode_single():
-                    return self.model.encode(
+                    embeddings = self.model.encode(
                         data,
-                        device=device_param,
+                        pool=pool,
                         batch_size=self.batch_size,
-                        show_progress_bar=True,
+                        chunk_size=csz,
+                        show_progress_bar=False,
                         normalize_embeddings=normalize,
                         precision="float32",
                         prompt_name=psg_prompt_name,
                         task=psg_task,
                     )
-
-                embeddings = await asyncio.to_thread(_encode_single)
+                finally:
+                    self.model.stop_multi_process_pool(pool)
+            else:
+                embeddings = self.model.encode(
+                    data,
+                    device=device_param,
+                    batch_size=self.batch_size,
+                    show_progress_bar=False,
+                    normalize_embeddings=normalize,
+                    precision="float32",
+                    prompt_name=psg_prompt_name,
+                    task=psg_task,
+                )
 
         elif self.backend == "openai":
             if is_multimodal:
@@ -796,8 +806,8 @@ class Retriever:
             async with self.model:
                 query_embedding, _ = await self.model.embed(sentences=queries)
         elif self.backend == "sentence_transformers":
-            if self.device == "cpu":
-                device_param = "cpu"
+            if self.device in ("cpu", "mps"):
+                device_param = self.device
                 is_multi_gpu = False
             else:
                 if self.device_num > 1:
@@ -808,43 +818,35 @@ class Retriever:
                     is_multi_gpu = False
 
             normalize = bool(self.st_encode_params.get("normalize_embeddings", False))
-            q_prompt_name = self.st_encode_params.get("q_prompt_name", "")
+            q_prompt_name = self.st_encode_params.get("q_prompt_name", None) or None
             q_task = self.st_encode_params.get("q_task", None)
 
             if is_multi_gpu:
                 pool = self.model.start_multi_process_pool()
                 try:
-
-                    def _encode_all():
-                        return self.model.encode(
-                            queries,
-                            pool=pool,
-                            batch_size=self.batch_size,
-                            show_progress_bar=True,
-                            normalize_embeddings=normalize,
-                            precision="float32",
-                            prompt_name=q_prompt_name,
-                            task=q_task,
-                        )
-
-                    query_embedding = await asyncio.to_thread(_encode_all)
-                finally:
-                    self.model.stop_multi_process_pool(pool)
-            else:
-
-                def _encode_single():
-                    return self.model.encode(
+                    query_embedding = self.model.encode(
                         queries,
-                        device=device_param,
+                        pool=pool,
                         batch_size=self.batch_size,
-                        show_progress_bar=True,
+                        show_progress_bar=False,
                         normalize_embeddings=normalize,
                         precision="float32",
                         prompt_name=q_prompt_name,
                         task=q_task,
                     )
-
-                query_embedding = await asyncio.to_thread(_encode_single)
+                finally:
+                    self.model.stop_multi_process_pool(pool)
+            else:
+                query_embedding = self.model.encode(
+                    queries,
+                    device=device_param,
+                    batch_size=self.batch_size,
+                    show_progress_bar=False,
+                    normalize_embeddings=normalize,
+                    precision="float32",
+                    prompt_name=q_prompt_name,
+                    task=q_task,
+                )
 
         elif self.backend == "openai":
             query_embedding = []

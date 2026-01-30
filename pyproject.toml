@@ -42,7 +42,8 @@ retriever = [
     "sentence-transformers",
     "openai",
     "bm25s",
-    "faiss-gpu-cu12",
+    "faiss-gpu-cu12; sys_platform == 'linux'",
+    "faiss-cpu; sys_platform == 'darwin'",
     "exa_py",
     "tavily-python",
     "pymilvus",
@@ -54,7 +55,8 @@ retriever = [
 ]
 
 generation = [
-    "vllm>=0.13.0",
+    "vllm>=0.13.0; sys_platform == 'linux'",
+    "mlx-lm; sys_platform == 'darwin'",
     "openai",
     "transformers",
     "torch",
